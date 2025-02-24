@@ -1,4 +1,5 @@
 import { MastraBundler } from '@mastra/core/bundler';
+import commonjs from '@rollup/plugin-commonjs';
 import virtual from '@rollup/plugin-virtual';
 import { copy, ensureDir } from 'fs-extra';
 import { existsSync } from 'node:fs';
@@ -132,6 +133,8 @@ export abstract class Bundler extends MastraBundler {
     } else {
       inputOptions.input = { index: serverFile };
     }
+
+    inputOptions.logLevel = 'silent';
 
     const bundler = await this.createBundler(inputOptions, { dir: bundleLocation });
 

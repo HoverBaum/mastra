@@ -1,3 +1,4 @@
+import { parseAsync, transformAsync, traverse } from '@babel/core';
 import type { Logger } from '@mastra/core';
 import commonjs from '@rollup/plugin-commonjs';
 import json from '@rollup/plugin-json';
@@ -8,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { rollup, type Plugin } from 'rollup';
 import esbuild from 'rollup-plugin-esbuild';
 
+import { captureImports } from './babel/capture-imports';
 import { isNodeBuiltin } from './isNodeBuiltin';
 import { aliasHono } from './plugins/hono-alias';
 import { pino } from './plugins/pino';
@@ -80,12 +82,12 @@ async function analyze(
 
   await optimizerBundler.close();
 
-  const depsToOptimize = new Map(Object.entries(output[0].importedBindings));
-  for (const dep of depsToOptimize.keys()) {
-    if (isNodeBuiltin(dep)) {
-      depsToOptimize.delete(dep);
-    }
-  }
+  const depsToOptimize = new Map<string, [string, string][]>();
+  await transformAsync(output[0].code, {
+    babelrc: false,
+    configFile: false,
+    plugins: [captureImports(depsToOptimize)],
+  });
 
   return depsToOptimize;
 }
@@ -99,7 +101,7 @@ async function analyze(
  * @param logger - Logger instance for debugging
  * @returns Object containing bundle output and reference map for validation
  */
-async function bundleExternals(depsToOptimize: Map<string, string[]>, outputDir: string, logger: Logger) {
+async function bundleExternals(depsToOptimize: Map<string, [string, string][]>, outputDir: string, logger: Logger) {
   logger.info('Optimizing dependencies...');
   logger.debug(
     `${Array.from(depsToOptimize.keys())
@@ -113,19 +115,25 @@ async function bundleExternals(depsToOptimize: Map<string, string[]>, outputDir:
     const name = dep.replaceAll('/', '-');
     reverseVirtualReferenceMap.set(name, dep);
 
-    // temporary fix for * import of telemetry, move ast checks???
-    if (dep === '@mastra/core/telemetry' && exports.length === 1 && exports[0] === '*') {
-      virtualDependencies.set(dep, {
-        name,
-        virtual: `export * as telemetry from '${dep}';`,
-      });
-    } else {
-      virtualDependencies.set(dep, {
-        name,
-        virtual: `export { ${exports.join(', ')} } from '${dep}';`,
-      });
+    let starExport: string | null = null;
+    let exportStringBuilder = [];
+    for (const [local, named] of exports) {
+      if (local === '*') {
+        starExport = `* as ${named}`;
+      } else {
+        exportStringBuilder.push(`${local} as ${named}`);
+      }
     }
+
+    let virtualFile = `export ${starExport ? `${starExport},` : ''} { ${exportStringBuilder.join(', ')} } from '${dep}';`;
+
+    virtualDependencies.set(dep, {
+      name,
+      virtual: virtualFile,
+    });
   }
+
+  console.log(virtualDependencies);
 
   const bundler = await rollup({
     logLevel: process.env.MASTRA_BUNDLER_DEBUG === 'true' ? 'debug' : 'silent',
